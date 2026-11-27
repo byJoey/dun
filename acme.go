@@ -59,6 +59,30 @@ func waitTXT(name, val string, ns []string) {
 
 // 用 Cloudflare DNS 验证向 Let's Encrypt 申请证书
 func issueCert(st *State, c *CF) error {
+	chain, key, err := obtainCert(st, c)
+	if err != nil {
+		return err
+	}
+	return saveCert(chain, key)
+}
+
+// 先写私钥再写证书；证书没写成就把旧私钥放回去，免得两边对不上
+func saveCert(chain, key []byte) error {
+	oldKey, _ := os.ReadFile(keyFile)
+	if err := writeFileAtomic(keyFile, key, 0600); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(certFile, chain, 0644); err != nil {
+		if oldKey != nil {
+			writeFileAtomic(keyFile, oldKey, 0600)
+		}
+		return err
+	}
+	return nil
+}
+
+// 只签发，不落盘：换域名时新证书要等别的步骤都成功了才换上
+func obtainCert(st *State, c *CF) (chain, key []byte, err error) {
 	host := st.TLS.Host
 	if st.TLS.CertName != "" {
 		host = st.TLS.CertName
@@ -69,20 +93,20 @@ func issueCert(st *State, c *CF) error {
 
 	ak, err := loadOrNewKey(acmeKeyPath)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	cl := &acme.Client{Key: ak, DirectoryURL: acme.LetsEncryptURL}
 	if _, err := cl.Register(ctx, &acme.Account{}, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
-		return fmt.Errorf("注册 ACME 账号失败: %v", err)
+		return nil, nil, fmt.Errorf("注册 ACME 账号失败: %v", err)
 	}
 	order, err := cl.AuthorizeOrder(ctx, acme.DomainIDs(host))
 	if err != nil {
-		return fmt.Errorf("创建订单失败: %v", err)
+		return nil, nil, fmt.Errorf("创建订单失败: %v", err)
 	}
 	for _, u := range order.AuthzURLs {
 		z, err := cl.GetAuthorization(ctx, u)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		// 通配符证书的验证记录挂在去掉 *. 的那一级上
 		txtName := "_acme-challenge." + z.Identifier.Value
@@ -96,11 +120,11 @@ func issueCert(st *State, c *CF) error {
 			}
 		}
 		if ch == nil {
-			return errors.New("CA 没给 dns-01 验证方式")
+			return nil, nil, errors.New("CA 没给 dns-01 验证方式")
 		}
 		val, err := cl.DNS01ChallengeRecord(ch.Token)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		if old, err := c.DNSList(zid, txtName); err == nil {
 			for _, r := range old {
@@ -111,7 +135,7 @@ func issueCert(st *State, c *CF) error {
 		}
 		rid, err := c.DNSCreate(zid, DNSRecord{Type: "TXT", Name: txtName, Content: val, TTL: 60, Comment: "dun acme"})
 		if err != nil {
-			return fmt.Errorf("添加验证记录失败: %v", err)
+			return nil, nil, fmt.Errorf("添加验证记录失败: %v", err)
 		}
 		waitTXT(txtName, val, st.Zone.NS)
 		_, err = cl.Accept(ctx, ch)
@@ -120,27 +144,24 @@ func issueCert(st *State, c *CF) error {
 		}
 		c.DNSDelete(zid, rid)
 		if err != nil {
-			return fmt.Errorf("域名验证没通过: %v", err)
+			return nil, nil, fmt.Errorf("域名验证没通过: %v", err)
 		}
 	}
 	if order, err = cl.WaitOrder(ctx, order.URI); err != nil {
-		return fmt.Errorf("订单没完成: %v", err)
+		return nil, nil, fmt.Errorf("订单没完成: %v", err)
 	}
 	ck, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	csr, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: []string{host}}, ck)
 	ders, _, err := cl.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
 	if err != nil {
-		return fmt.Errorf("签发失败: %v", err)
+		return nil, nil, fmt.Errorf("签发失败: %v", err)
 	}
-	var chain strings.Builder
+	var pemChain strings.Builder
 	for _, d := range ders {
-		chain.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: d}))
+		pemChain.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: d}))
 	}
 	kd, _ := x509.MarshalECPrivateKey(ck)
-	if err := writeFileAtomic(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kd}), 0600); err != nil {
-		return err
-	}
-	return writeFileAtomic(certFile, []byte(chain.String()), 0644)
+	return []byte(pemChain.String()), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kd}), nil
 }
 
 func certExpiry() (time.Time, bool) {

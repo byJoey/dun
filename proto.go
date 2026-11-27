@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	mrand "math/rand/v2"
+	"net/http"
 	"os"
 	"regexp"
 	"strconv"
@@ -146,6 +148,15 @@ func cfPickHostUnder(st *State, c *CF, hint, parent string) (string, []DNSRecord
 }
 
 func dnsSet(st *State, c *CF, host string, proxied bool) string {
+	id, err := dnsPut(st, c, host, proxied)
+	if err != nil {
+		die("添加解析失败: %v", err)
+	}
+	return id
+}
+
+// 同名的解析先删掉再加自己的；原来有的已经在选子域名时备份了
+func dnsPut(st *State, c *CF, host string, proxied bool) (string, error) {
 	if rs, err := c.DNSList(st.Zone.ID, host); err == nil {
 		for _, r := range rs {
 			c.DNSDelete(st.Zone.ID, r.ID)
@@ -155,43 +166,50 @@ func dnsSet(st *State, c *CF, host string, proxied bool) string {
 	if st.IP4 == "" {
 		rec.Type, rec.Content = "AAAA", st.IP6
 	}
-	id, err := c.DNSCreate(st.Zone.ID, rec)
-	if err != nil {
-		die("添加解析失败: %v", err)
-	}
-	return id
+	return c.DNSCreate(st.Zone.ID, rec)
 }
 
-func dnsDrop(st *State, c *CF, host, id string, backup []DNSRecord) {
+// 删掉自己那条解析，再把原来被覆盖的放回去；那条已经不在了也算删掉
+func dnsDrop(st *State, c *CF, host, id string, backup []DNSRecord) error {
 	if c == nil || st.Zone == nil {
 		warn("没有 CF 凭据，%s 的解析请自己去 CF 后台删", host)
-		return
+		return errors.New("没有 CF 凭据")
 	}
 	if id != "" {
-		c.DNSDelete(st.Zone.ID, id)
+		var apiErr *cfAPIError
+		if err := c.DNSDelete(st.Zone.ID, id); err != nil && !(errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound) {
+			return err
+		}
 	}
 	for _, r := range backup {
 		if _, err := c.DNSCreate(st.Zone.ID, r); err == nil {
 			info("已还原 %s 原有的 %s 解析", host, r.Type)
 		}
 	}
+	return nil
 }
 
 func wsRules(st *State, c *CF) {
+	if err := wsRulesPut(st, c); err != nil {
+		die("%v。补好权限后用菜单 10 重新应用 WS 端口", err)
+	}
+}
+
+func wsRulesPut(st *State, c *CF) error {
 	host, zid := st.WS.Host, st.Zone.ID
 	expr := fmt.Sprintf(`(http.host eq "%s")`, host)
 	if err := c.RuleUpsert(zid, "http_request_origin", rulePrefix+host, map[string]any{
 		"expression": expr, "action": "route",
 		"action_parameters": map[string]any{"origin": map[string]any{"port": st.WS.PubPort}},
 	}); err != nil {
-		die("写回源规则失败，使用 Token 时请检查 Origin Rules 的 Edit 权限。补好权限后用菜单 10 重新应用 WS 端口：%v", err)
+		return fmt.Errorf("写回源规则失败，使用 Token 时请检查 Origin Rules 的 Edit 权限：%v", err)
 	}
 	// 只对这个子域名改 SSL 和安全级别，整个域名的设置不动
 	if err := c.RuleUpsert(zid, "http_config_settings", rulePrefix+host, map[string]any{
 		"expression": expr, "action": "set_config",
 		"action_parameters": map[string]any{"ssl": "flexible", "security_level": "essentially_off", "bic": false},
 	}); err != nil {
-		die("写配置规则失败，使用 Token 时请检查 Config Rules 的 Edit 权限。补好权限后用菜单 10 重新应用 WS 端口：%v", err)
+		return fmt.Errorf("写配置规则失败，使用 Token 时请检查 Config Rules 的 Edit 权限：%v", err)
 	}
 	setting := c.Setting(zid, "websockets")
 	if c.Token != "" && setting == "" {
@@ -203,6 +221,7 @@ func wsRules(st *State, c *CF) {
 			warn("请在 Cloudflare 域名的「网络」页面手动开启 WebSockets")
 		}
 	}
+	return nil
 }
 
 // 偷自己、AnyTLS、Hysteria2 共用一个只解析、不走 CF 代理的子域名。

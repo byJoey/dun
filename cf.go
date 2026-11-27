@@ -292,7 +292,8 @@ func cfKeyAsToken(c *CF) (*CF, bool) {
 	return t, true
 }
 
-func cfPrompt(st *State) *CF {
+// 问一份凭据，验证通过才返回，不保存
+func cfAsk() *CF {
 	for {
 		info("选择 Cloudflare 凭据：1. 邮箱 + Global API Key   2. API Token")
 		c := &CF{}
@@ -323,9 +324,34 @@ func cfPrompt(st *State) *CF {
 			warn("验证失败：%v。再来一次（Ctrl+C 退出）", err)
 			continue
 		}
+		return c
+	}
+}
+
+func cfWrite(c *CF) error {
+	b, _ := json.Marshal(c)
+	if err := writeFileAtomic(cfPath, b, 0600); err != nil {
+		return fmt.Errorf("保存 Cloudflare 凭据失败：%v", err)
+	}
+	cfCur = c
+	return nil
+}
+
+func cfSave(c *CF) {
+	if err := cfWrite(c); err != nil {
+		die("%v", err)
+	}
+	ok("Cloudflare 凭据已保存")
+}
+
+// 现有域名要继续用：新凭据管不了它就再问一次
+func cfPrompt(st *State) *CF {
+	for {
+		c := cfAsk()
 		if st.Zone != nil && (st.TLS != nil || st.WS != nil) {
 			if _, err := c.DNSList(st.Zone.ID, st.Zone.Name); err != nil {
 				warn("新凭据无法访问现有域名 %s 的 DNS 记录：%v", st.Zone.Name, err)
+				info("换了 Cloudflare 账号、想把节点搬到新账号的域名上，Ctrl+C 退出后进菜单 18")
 				continue
 			}
 			if st.WS != nil && c.Token != "" {
@@ -335,12 +361,7 @@ func cfPrompt(st *State) *CF {
 				}
 			}
 		}
-		b, _ := json.Marshal(c)
-		if err := writeFileAtomic(cfPath, b, 0600); err != nil {
-			die("保存 Cloudflare 凭据失败：%v", err)
-		}
-		ok("Cloudflare 凭据已保存")
-		cfCur = c
+		cfSave(c)
 		return c
 	}
 }

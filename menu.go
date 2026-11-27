@@ -383,17 +383,6 @@ func syncIP(st *State) {
 	showLinks(st)
 }
 
-func changeCF(st *State) {
-	if st.Zone != nil && (st.TLS != nil || st.WS != nil) {
-		info("新凭据需要能管理现有域名 %s", st.Zone.Name)
-	}
-	cfPrompt(st)
-	if st.TLS == nil && st.WS == nil {
-		st.Zone = nil
-		st.save()
-	}
-}
-
 func updateCore(st *State) {
 	cur, latest := sbVersion(), ghLatest("SagerNet/sing-box")
 	if latest == "" {
@@ -567,7 +556,7 @@ func menu(st *State) {
  15. 开启 BBR
  16. IP 变了：同步解析
  17. 更换节点域名
- 18. 更换 Cloudflare 凭据
+ 18. 更换 Cloudflare 凭据 / 域名
  19. 更新 dun
  20. 全部卸载
 ────────────────────────────────────────────

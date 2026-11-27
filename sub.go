@@ -457,7 +457,7 @@ var clashGroups = []struct{ name, first string }{
 	{"YouTube", "节点选择"},
 	{"流媒体", "节点选择"},
 	{"谷歌", "节点选择"},
-	{"微软", "DIRECT"},
+	{"微软", "节点选择"},
 	{"苹果", "DIRECT"},
 	{"漏网之鱼", "节点选择"},
 }
@@ -478,6 +478,7 @@ const clashRules = `rules:
   - GEOIP,netflix,流媒体,no-resolve
   - GEOSITE,google,谷歌
   - GEOIP,google,谷歌,no-resolve
+  - GEOSITE,microsoft@cn,DIRECT
   - GEOSITE,microsoft,微软
   - GEOSITE,apple,苹果
   - GEOSITE,geolocation-!cn,节点选择
