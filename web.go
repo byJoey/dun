@@ -182,19 +182,7 @@ func serve() {
 			log.Fatalf("伪装站监听失败: %v", err)
 		}
 		go func() { errs <- srv.ServeTLS(ln, "", "") }()
-		// 80 空着就做个跳转，像个正常网站
-		if st.WS == nil || st.WS.Port != 80 {
-			if ln80, err := net.Listen("tcp", ":80"); err == nil {
-				host := st.TLS.Host
-				go http.Serve(ln80, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if strings.Split(r.Host, ":")[0] != host {
-						http.NotFound(w, r)
-						return
-					}
-					http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusMovedPermanently)
-				}))
-			}
-		}
+		// 不碰 80：开机时会和 nginx 这类网站抢端口，抢到了网站就起不来
 	}
 	if st.Hy2 != nil {
 		hopApply(st) // 重启机器后 nat 表是空的，这里补上
